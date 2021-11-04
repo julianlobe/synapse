@@ -30,7 +30,7 @@ from synapse.handlers.room_summary import _child_events_comparison_key, _RoomEnt
 from synapse.rest import admin
 from synapse.rest.client import login, room
 from synapse.server import HomeServer
-from synapse.types import JsonDict, UserID
+from synapse.types import JsonDict, UserID, create_requester
 
 from tests import unittest
 
@@ -247,7 +247,7 @@ class SpaceSummaryTestCase(unittest.HomeserverTestCase):
         self._assert_rooms(result, expected)
 
         result = self.get_success(
-            self.handler.get_room_hierarchy(self.user, self.space)
+            self.handler.get_room_hierarchy(create_requester(self.user), self.space)
         )
         self._assert_hierarchy(result, expected)
 
@@ -261,7 +261,9 @@ class SpaceSummaryTestCase(unittest.HomeserverTestCase):
         expected = [(self.space, [self.room]), (self.room, ())]
         self._assert_rooms(result, expected)
 
-        result = self.get_success(self.handler.get_room_hierarchy(user2, self.space))
+        result = self.get_success(
+            self.handler.get_room_hierarchy(create_requester(user2), self.space)
+        )
         self._assert_hierarchy(result, expected)
 
         # If the space is made invite-only, it should no longer be viewable.
@@ -272,7 +274,10 @@ class SpaceSummaryTestCase(unittest.HomeserverTestCase):
             tok=self.token,
         )
         self.get_failure(self.handler.get_space_summary(user2, self.space), AuthError)
-        self.get_failure(self.handler.get_room_hierarchy(user2, self.space), AuthError)
+        self.get_failure(
+            self.handler.get_room_hierarchy(create_requester(user2), self.space),
+            AuthError,
+        )
 
         # If the space is made world-readable it should return a result.
         self.helper.send_state(
@@ -284,7 +289,9 @@ class SpaceSummaryTestCase(unittest.HomeserverTestCase):
         result = self.get_success(self.handler.get_space_summary(user2, self.space))
         self._assert_rooms(result, expected)
 
-        result = self.get_success(self.handler.get_room_hierarchy(user2, self.space))
+        result = self.get_success(
+            self.handler.get_room_hierarchy(create_requester(user2), self.space)
+        )
         self._assert_hierarchy(result, expected)
 
         # Make it not world-readable again and confirm it results in an error.
@@ -295,7 +302,10 @@ class SpaceSummaryTestCase(unittest.HomeserverTestCase):
             tok=self.token,
         )
         self.get_failure(self.handler.get_space_summary(user2, self.space), AuthError)
-        self.get_failure(self.handler.get_room_hierarchy(user2, self.space), AuthError)
+        self.get_failure(
+            self.handler.get_room_hierarchy(create_requester(user2), self.space),
+            AuthError,
+        )
 
         # Join the space and results should be returned.
         self.helper.invite(self.space, targ=user2, tok=self.token)
@@ -303,7 +313,9 @@ class SpaceSummaryTestCase(unittest.HomeserverTestCase):
         result = self.get_success(self.handler.get_space_summary(user2, self.space))
         self._assert_rooms(result, expected)
 
-        result = self.get_success(self.handler.get_room_hierarchy(user2, self.space))
+        result = self.get_success(
+            self.handler.get_room_hierarchy(create_requester(user2), self.space)
+        )
         self._assert_hierarchy(result, expected)
 
         # Attempting to view an unknown room returns the same error.
@@ -312,7 +324,9 @@ class SpaceSummaryTestCase(unittest.HomeserverTestCase):
             AuthError,
         )
         self.get_failure(
-            self.handler.get_room_hierarchy(user2, "#not-a-space:" + self.hs.hostname),
+            self.handler.get_room_hierarchy(
+                create_requester(user2), "#not-a-space:" + self.hs.hostname
+            ),
             AuthError,
         )
 
@@ -410,7 +424,9 @@ class SpaceSummaryTestCase(unittest.HomeserverTestCase):
         ]
         self._assert_rooms(result, expected)
 
-        result = self.get_success(self.handler.get_room_hierarchy(user2, self.space))
+        result = self.get_success(
+            self.handler.get_room_hierarchy(create_requester(user2), self.space)
+        )
         self._assert_hierarchy(result, expected)
 
     def test_complex_space(self):
@@ -452,7 +468,7 @@ class SpaceSummaryTestCase(unittest.HomeserverTestCase):
         self._assert_rooms(result, expected)
 
         result = self.get_success(
-            self.handler.get_room_hierarchy(self.user, self.space)
+            self.handler.get_room_hierarchy(create_requester(self.user), self.space)
         )
         self._assert_hierarchy(result, expected)
 
@@ -467,7 +483,9 @@ class SpaceSummaryTestCase(unittest.HomeserverTestCase):
         room_ids.append(self.room)
 
         result = self.get_success(
-            self.handler.get_room_hierarchy(self.user, self.space, limit=7)
+            self.handler.get_room_hierarchy(
+                create_requester(self.user), self.space, limit=7
+            )
         )
         # The result should have the space and all of the links, plus some of the
         # rooms and a pagination token.
@@ -479,7 +497,10 @@ class SpaceSummaryTestCase(unittest.HomeserverTestCase):
         # Check the next page.
         result = self.get_success(
             self.handler.get_room_hierarchy(
-                self.user, self.space, limit=5, from_token=result["next_batch"]
+                create_requester(self.user),
+                self.space,
+                limit=5,
+                from_token=result["next_batch"],
             )
         )
         # The result should have the space and the room in it, along with a link
@@ -499,20 +520,22 @@ class SpaceSummaryTestCase(unittest.HomeserverTestCase):
         room_ids.append(self.room)
 
         result = self.get_success(
-            self.handler.get_room_hierarchy(self.user, self.space, limit=7)
+            self.handler.get_room_hierarchy(
+                create_requester(self.user), self.space, limit=7
+            )
         )
         self.assertIn("next_batch", result)
 
         # Changing the room ID, suggested-only, or max-depth causes an error.
         self.get_failure(
             self.handler.get_room_hierarchy(
-                self.user, self.room, from_token=result["next_batch"]
+                create_requester(self.user), self.room, from_token=result["next_batch"]
             ),
             SynapseError,
         )
         self.get_failure(
             self.handler.get_room_hierarchy(
-                self.user,
+                create_requester(self.user),
                 self.space,
                 suggested_only=True,
                 from_token=result["next_batch"],
@@ -521,14 +544,19 @@ class SpaceSummaryTestCase(unittest.HomeserverTestCase):
         )
         self.get_failure(
             self.handler.get_room_hierarchy(
-                self.user, self.space, max_depth=0, from_token=result["next_batch"]
+                create_requester(self.user),
+                self.space,
+                max_depth=0,
+                from_token=result["next_batch"],
             ),
             SynapseError,
         )
 
         # An invalid token is ignored.
         self.get_failure(
-            self.handler.get_room_hierarchy(self.user, self.space, from_token="foo"),
+            self.handler.get_room_hierarchy(
+                create_requester(self.user), self.space, from_token="foo"
+            ),
             SynapseError,
         )
 
@@ -554,14 +582,18 @@ class SpaceSummaryTestCase(unittest.HomeserverTestCase):
 
         # Test just the space itself.
         result = self.get_success(
-            self.handler.get_room_hierarchy(self.user, self.space, max_depth=0)
+            self.handler.get_room_hierarchy(
+                create_requester(self.user), self.space, max_depth=0
+            )
         )
         expected: List[Tuple[str, Iterable[str]]] = [(spaces[0], [rooms[0], spaces[1]])]
         self._assert_hierarchy(result, expected)
 
         # A single additional layer.
         result = self.get_success(
-            self.handler.get_room_hierarchy(self.user, self.space, max_depth=1)
+            self.handler.get_room_hierarchy(
+                create_requester(self.user), self.space, max_depth=1
+            )
         )
         expected += [
             (rooms[0], ()),
@@ -571,7 +603,9 @@ class SpaceSummaryTestCase(unittest.HomeserverTestCase):
 
         # A few layers.
         result = self.get_success(
-            self.handler.get_room_hierarchy(self.user, self.space, max_depth=3)
+            self.handler.get_room_hierarchy(
+                create_requester(self.user), self.space, max_depth=3
+            )
         )
         expected += [
             (rooms[1], ()),
@@ -602,7 +636,7 @@ class SpaceSummaryTestCase(unittest.HomeserverTestCase):
         self._assert_rooms(result, expected)
 
         result = self.get_success(
-            self.handler.get_room_hierarchy(self.user, self.space)
+            self.handler.get_room_hierarchy(create_requester(self.user), self.space)
         )
         self._assert_hierarchy(result, expected)
 
@@ -684,7 +718,7 @@ class SpaceSummaryTestCase(unittest.HomeserverTestCase):
             new=summarize_remote_room_hierarchy,
         ):
             result = self.get_success(
-                self.handler.get_room_hierarchy(self.user, self.space)
+                self.handler.get_room_hierarchy(create_requester(self.user), self.space)
             )
         self._assert_hierarchy(result, expected)
 
@@ -851,7 +885,7 @@ class SpaceSummaryTestCase(unittest.HomeserverTestCase):
             new=summarize_remote_room_hierarchy,
         ):
             result = self.get_success(
-                self.handler.get_room_hierarchy(self.user, self.space)
+                self.handler.get_room_hierarchy(create_requester(self.user), self.space)
             )
         self._assert_hierarchy(result, expected)
 
@@ -909,7 +943,7 @@ class SpaceSummaryTestCase(unittest.HomeserverTestCase):
             new=summarize_remote_room_hierarchy,
         ):
             result = self.get_success(
-                self.handler.get_room_hierarchy(self.user, self.space)
+                self.handler.get_room_hierarchy(create_requester(self.user), self.space)
             )
         self._assert_hierarchy(result, expected)
 
