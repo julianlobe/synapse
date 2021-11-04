@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 def client_patterns(
     path_regex: str,
-    releases: Iterable[int] = (0,),
+    releases: Iterable[str] = ("r0",),
     unstable: bool = True,
     v1: bool = False,
 ) -> Iterable[Pattern]:
@@ -39,7 +39,7 @@ def client_patterns(
             as this will be prefixed.
         releases: An iterable of releases to include this endpoint under.
         unstable: If true, include this endpoint under the "unstable" prefix.
-        v1: If true, include this endpoint under the "api/v1" prefix.
+        v1: If true, include this endpoint under the legacy "api/v1" prefix.
     Returns:
         An iterable of patterns.
     """
@@ -52,7 +52,7 @@ def client_patterns(
         v1_prefix = CLIENT_API_PREFIX + "/api/v1"
         patterns.append(re.compile("^" + v1_prefix + path_regex))
     for release in releases:
-        new_prefix = CLIENT_API_PREFIX + "/r%d" % (release,)
+        new_prefix = CLIENT_API_PREFIX + "/" + release
         patterns.append(re.compile("^" + new_prefix + path_regex))
 
     return patterns
