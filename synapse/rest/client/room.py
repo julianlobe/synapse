@@ -1166,7 +1166,7 @@ class RoomHierarchyRestServlet(RestServlet):
             )
 
         limit = parse_integer(request, "limit")
-        if limit is not None and limit <= 0:
+        if limit is not None and limit < 0:
             raise SynapseError(
                 400, "'limit' must be a positive integer", Codes.BAD_JSON
             )
