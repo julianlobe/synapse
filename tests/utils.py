@@ -144,6 +144,7 @@ def default_config(name, parse=False):
         "admin_contact": None,
         "rc_message": {"per_second": 10000, "burst_count": 10000},
         "rc_registration": {"per_second": 10000, "burst_count": 10000},
+        "rc_key_requests": {"per_second": 10000, "burst_count": 10000},
         "rc_login": {
             "address": {"per_second": 10000, "burst_count": 10000},
             "account": {"per_second": 10000, "burst_count": 10000},

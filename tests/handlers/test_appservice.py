@@ -1,4 +1,4 @@
-# Copyright 2015, 2016 OpenMarket Ltd
+# Copyright 2015-2021 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,17 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Dict, Iterable, List, Optional, Tuple
 from unittest.mock import Mock
 
 from twisted.internet import defer
 
+import synapse.rest.admin
+import synapse.storage
+from synapse.appservice import ApplicationService
 from synapse.handlers.appservice import ApplicationServicesHandler
-from synapse.types import RoomStreamToken
+from synapse.rest.client import login, receipts, room, sendtodevice
+from synapse.types import JsonDict, RoomStreamToken
+from synapse.util import json_encoder
+from synapse.util.stringutils import random_string
 
+from tests import unittest
 from tests.test_utils import make_awaitable
 from tests.utils import MockClock
-
-from .. import unittest
 
 
 class AppServiceHandlerTestCase(unittest.TestCase):
@@ -253,20 +259,24 @@ class AppServiceHandlerTestCase(unittest.TestCase):
             },
         )
 
-    def test_notify_interested_services_ephemeral(self):
+    def test_notify_interested_services_ephemeral_read_receipt(self):
         """
-        Test sending ephemeral events to the appservice handler are scheduled
+        Test sending read receipts to the appservice handler are scheduled
         to be pushed out to interested appservices, and that the stream ID is
         updated accordingly.
         """
+        # Create an application service that is guaranteed to be interested in
+        # any new events
         interested_service = self._mkservice(is_interested=True)
         services = [interested_service]
-
         self.mock_store.get_app_services.return_value = services
+
+        # State that this application service has received up until stream ID 579
         self.mock_store.get_type_stream_id_for_appservice.return_value = make_awaitable(
             579
         )
 
+        # Set up a dummy event that should be sent to the application service
         event = Mock(event_id="event_1")
         self.event_source.sources.receipt.get_new_events_as.return_value = (
             make_awaitable(([event], None))
@@ -321,3 +331,272 @@ class AppServiceHandlerTestCase(unittest.TestCase):
         service.token = "mock_service_token"
         service.url = "mock_service_url"
         return service
+
+
+class ApplicationServiceEphemeralEventsTestCase(unittest.HomeserverTestCase):
+    servlets = [
+        synapse.rest.admin.register_servlets_for_client_rest_resource,
+        login.register_servlets,
+        room.register_servlets,
+        sendtodevice.register_servlets,
+        receipts.register_servlets,
+    ]
+
+    def prepare(self, reactor, clock, hs):
+        # Mock the application service scheduler so that we can track any
+        # outgoing transactions
+        self.mock_scheduler = Mock()
+        self.mock_scheduler.submit_ephemeral_events_for_as = Mock()
+
+        hs.get_application_service_handler().scheduler = self.mock_scheduler
+
+        self.device1 = "device1"
+        self.user1 = self.register_user("user1", "password")
+        self.token1 = self.login("user1", "password", self.device1)
+
+        self.device2 = "device2"
+        self.user2 = self.register_user("user2", "password")
+        self.token2 = self.login("user2", "password", self.device2)
+
+    @unittest.override_config(
+        {"experimental_features": {"msc2409_to_device_messages_enabled": True}}
+    )
+    def test_application_services_receive_local_to_device(self):
+        """
+        Test that when a user sends a to-device message to another user, and
+        that is in an application service's user namespace, that application
+        service will receive it.
+        """
+        (
+            interested_services,
+            _,
+        ) = self._register_interested_and_uninterested_application_services()
+        interested_service = interested_services[0]
+
+        # Have user1 send a to-device message to user2
+        message_content = {"some_key": "some really interesting value"}
+        chan = self.make_request(
+            "PUT",
+            "/_matrix/client/r0/sendToDevice/m.room_key_request/3",
+            content={"messages": {self.user2: {self.device2: message_content}}},
+            access_token=self.token1,
+        )
+        self.assertEqual(chan.code, 200, chan.result)
+
+        # Have user2 send a to-device message to user1
+        chan = self.make_request(
+            "PUT",
+            "/_matrix/client/r0/sendToDevice/m.room_key_request/4",
+            content={"messages": {self.user1: {self.device1: message_content}}},
+            access_token=self.token2,
+        )
+        self.assertEqual(chan.code, 200, chan.result)
+
+        # Check if our application service - that is interested in user2 - received
+        # the to-device message as part of an AS transaction.
+        # Only the user1 -> user2 to-device message should have been forwarded to the AS.
+        #
+        # The uninterested application service should not have been notified at all.
+        self.assertEqual(
+            1, self.mock_scheduler.submit_ephemeral_events_for_as.call_count
+        )
+        service, events = self.mock_scheduler.submit_ephemeral_events_for_as.call_args[
+            0
+        ]
+
+        # Assert that this was the same to-device message that user1 sent
+        self.assertEqual(service, interested_service)
+        self.assertEqual(events[0]["type"], "m.room_key_request")
+        self.assertEqual(events[0]["sender"], self.user1)
+
+        # Additional fields 'to_user_id' and 'to_device_id' specifically for
+        # to-device messages via the AS API
+        self.assertEqual(events[0]["to_user_id"], self.user2)
+        self.assertEqual(events[0]["to_device_id"], self.device2)
+        self.assertEqual(events[0]["content"], message_content)
+
+    @unittest.override_config(
+        {"experimental_features": {"msc2409_to_device_messages_enabled": True}}
+    )
+    def test_application_services_receive_bursts_of_to_device(self):
+        """
+        Test that when a user sends >100 to-device messages at once, any
+        interested AS's will receive them in separate transactions.
+        """
+        (
+            interested_services,
+            _,
+        ) = self._register_interested_and_uninterested_application_services(
+            interested_count=2,
+            uninterested_count=2,
+        )
+
+        to_device_message_content = {
+            "some key": "some interesting value",
+        }
+
+        # We need to send a large burst of to-device messages. We also would like to
+        # include them all in the same application service transaction so that we can
+        # test large transactions.
+        #
+        # To do this, we can send a single to-device message to many user devices at
+        # once. However, registering 100+ devices will make this test slow.
+        #
+        # So instead, let's insert some to-device messages directly into the inbox
+        # intended for some dummy devices.
+        #
+        # We insert number_of_messages - 1, as user2 already has one device. We'll then
+        # send a final to-device message to the real device, which will also kick off
+        # an AS transaction (as just inserting messages into the DB won't).
+        number_of_messages = 150
+        messages = {
+            self.user2: {
+                f"device_{num}": to_device_message_content
+                for num in range(number_of_messages - 1)
+            }
+        }
+        # Seed the device_inbox table with to-device messages intended for user2
+        next_device_inbox_stream_id = self.get_success(
+            self.hs.get_datastore()._device_inbox_id_gen.get_next().__aenter__()
+        )
+        self.get_success(
+            self.hs.get_datastore().db_pool.simple_insert_many(
+                desc="test_application_services_receive_burst_of_to_device",
+                table="device_inbox",
+                values=[
+                    {
+                        "user_id": user_id,
+                        "device_id": device_id,
+                        "stream_id": next_device_inbox_stream_id,
+                        "message_json": json_encoder.encode(message_json),
+                        "instance_name": "master",
+                    }
+                    for user_id, messages_by_device in messages.items()
+                    for device_id, message_json in messages_by_device.items()
+                ],
+            )
+        )
+
+        # Now have user1 send a final to-device message to user2. All unsent
+        # to-device messages should be sent to any application services
+        # interested in user2.
+        chan = self.make_request(
+            "PUT",
+            "/_matrix/client/r0/sendToDevice/m.room_key_request/4",
+            content={
+                "messages": {self.user2: {self.device2: to_device_message_content}}
+            },
+            access_token=self.token1,
+        )
+        self.assertEqual(chan.code, 200, chan.result)
+
+        # Count the total number of to-device messages that were sent out per-service.
+        # Ensure that we only sent to-device messages to interested services, and that
+        # each interested service received the full count of to-device messages.
+        service_id_to_message_count: Dict[str, int] = {}
+        self.assertGreater(
+            self.mock_scheduler.submit_ephemeral_events_for_as.call_count, 0
+        )
+        for call in self.mock_scheduler.submit_ephemeral_events_for_as.call_args_list:
+            service, events = call[0]
+
+            # Check that this was made to an interested service
+            self.assertIn(service, interested_services)
+
+            # Add to the count of messages for this application service
+            service_id_to_message_count.setdefault(service.id, 0)
+            service_id_to_message_count[service.id] += len(events)
+
+        # Assert that each interested service received the full count of messages
+        for count in service_id_to_message_count.values():
+            self.assertEqual(count, number_of_messages)
+
+    def _register_interested_and_uninterested_application_services(
+        self,
+        interested_count: int = 1,
+        uninterested_count: int = 1,
+    ) -> Tuple[List[ApplicationService], List[ApplicationService]]:
+        """
+        Create application services with and without exclusive interest
+        in user2.
+
+        Args:
+            interested_count: The number of application services to create
+                and register with exclusive interest.
+            uninterested_count: The number of application services to create
+                and register without any interest.
+
+        Returns:
+            A two-tuple containing:
+                * Interested application services
+                * Uninterested application services
+        """
+        # Create an application service with exclusive interest in user2
+        interested_services = []
+        uninterested_services = []
+        for _ in range(interested_count):
+            interested_service = self._make_application_service(
+                namespaces={
+                    ApplicationService.NS_USERS: [
+                        {
+                            "regex": "@user2:.+",
+                            "exclusive": True,
+                        }
+                    ],
+                },
+            )
+            interested_services.append(interested_service)
+
+        for _ in range(uninterested_count):
+            uninterested_services.append(self._make_application_service())
+
+        # Register this application service, along with another, uninterested one
+        services = [
+            *uninterested_services,
+            *interested_services,
+        ]
+        self.hs.get_datastore().get_app_services = Mock(return_value=services)
+
+        return interested_services, uninterested_services
+
+    def _make_application_service(
+        self,
+        namespaces: Optional[Dict[str, Iterable[Dict]]] = None,
+    ) -> ApplicationService:
+        return ApplicationService(
+            token=None,
+            hostname="example.com",
+            id=random_string(10),
+            sender="@as:example.com",
+            rate_limited=False,
+            namespaces=namespaces,
+            supports_ephemeral=True,
+        )
+
+    def _event_id_from_read_receipt(self, read_receipt_dict: JsonDict):
+        """
+        Extracts the first event ID from a read receipt. Read receipt dictionaries
+        are in the form:
+
+        {
+            'type': 'm.receipt',
+            'room_id': '!PEzCqHyycBVxqMKIjI:test',
+            'content': {
+                '$DETIeTEH651c1N7sP_j-YZiaQqCaayHhYwmhZDVWDY8': {  # We want this
+                    'm.read': {
+                        '@user1:test': {
+                            'ts': 1300,
+                            'hidden': False
+                        }
+                    }
+                }
+            }
+        }
+
+        Args:
+            read_receipt_dict: The dictionary returned from a POST read receipt call.
+
+        Returns:
+            The (first) event ID the read receipt refers to.
+        """
+        return list(read_receipt_dict["content"].keys())[0]
