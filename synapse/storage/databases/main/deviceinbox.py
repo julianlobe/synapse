@@ -125,8 +125,7 @@ class DeviceInboxWorkerStore(SQLBaseStore):
         user_ids: Collection[str],
         from_stream_id: int,
         to_stream_id: int,
-        limit: int = 100,
-    ) -> Tuple[Dict[Tuple[str, str], List[JsonDict]], int]:
+    ) -> Dict[Tuple[str, str], List[JsonDict]]:
         """
         Retrieve to-device messages for a given set of user IDs.
 
@@ -141,14 +140,9 @@ class DeviceInboxWorkerStore(SQLBaseStore):
             user_ids: The users to retrieve to-device messages for.
             from_stream_id: The lower boundary of stream id to filter with (exclusive).
             to_stream_id: The upper boundary of stream id to filter with (inclusive).
-            limit: The maximum number of to-device messages to return.
 
         Returns:
-            A tuple containing the following:
-                * A list of to-device messages
-                * The stream id that to-device messages were processed up to. The calling
-                  function can check this value against `to_stream_id` to see if we hit
-                  the given limit when fetching messages.
+            A list of to-device messages.
         """
         # Bail out if none of these users have any messages
         for user_id in user_ids:
@@ -157,7 +151,7 @@ class DeviceInboxWorkerStore(SQLBaseStore):
             ):
                 break
         else:
-            return {}, to_stream_id
+            return {}
 
         def get_new_messages_txn(txn: LoggingTransaction):
             # Build a query to select messages from any of the given users that are between
@@ -170,42 +164,28 @@ class DeviceInboxWorkerStore(SQLBaseStore):
             )
 
             sql = f"""
-                SELECT stream_id, user_id, device_id, message_json FROM device_inbox
+                SELECT user_id, device_id, message_json FROM device_inbox
                 WHERE {many_clause_sql}
                 AND ? < stream_id AND stream_id <= ?
                 ORDER BY stream_id ASC
-                LIMIT ?
             """
 
-            txn.execute(sql, (*many_clause_args, from_stream_id, to_stream_id, limit))
+            txn.execute(sql, (*many_clause_args, from_stream_id, to_stream_id))
 
             # Create a dictionary of (user ID, device ID) -> list of messages that
             # that device is meant to receive.
             recipient_user_id_device_id_to_messages = {}
 
-            stream_pos = to_stream_id
-            total_messages_processed = 0
             for row in txn:
-                # Record the last-processed stream position, to return later.
-                # Note that we process messages here in order of ascending stream id.
-                stream_pos = row[0]
-                recipient_user_id = row[1]
-                recipient_device_id = row[2]
-                message_dict = db_to_json(row[3])
+                recipient_user_id = row[0]
+                recipient_device_id = row[1]
+                message_dict = db_to_json(row[2])
 
                 recipient_user_id_device_id_to_messages.setdefault(
                     (recipient_user_id, recipient_device_id), []
                 ).append(message_dict)
-                total_messages_processed += 1
 
-            # If we don't end up hitting the limit, we still want to return the equivalent
-            # value of `to_stream_id` to the calling function. This is needed as we'll
-            # be processing up to `to_stream_id`, without necessarily fetching a message
-            # with a stream id of `to_stream_id`.
-            if total_messages_processed < limit:
-                stream_pos = to_stream_id
-
-            return recipient_user_id_device_id_to_messages, stream_pos
+            return recipient_user_id_device_id_to_messages
 
         return await self.db_pool.runInteraction(
             "get_new_messages", get_new_messages_txn

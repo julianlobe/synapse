@@ -12,16 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
-from typing import (
-    TYPE_CHECKING,
-    Collection,
-    Dict,
-    Iterable,
-    List,
-    Optional,
-    Tuple,
-    Union,
-)
+from typing import TYPE_CHECKING, Collection, Dict, Iterable, List, Optional, Union
 
 from prometheus_client import Counter
 
@@ -50,8 +41,6 @@ if TYPE_CHECKING:
     from synapse.server import HomeServer
 
 logger = logging.getLogger(__name__)
-
-MAX_TO_DEVICE_MESSAGES_PER_AS_TRANSACTION = 100
 
 events_processed_counter = Counter("synapse_handlers_appservice_events_processed", "")
 
@@ -332,21 +321,15 @@ class ApplicationServicesHandler:
                     ):
                         # Retrieve an iterable of to-device message events, as well as the
                         # maximum stream token of the messages we were able to retrieve.
-                        events, max_stream_token = await self._handle_to_device(
-                            service, new_token, users
-                        )
+                        events = await self._handle_to_device(service, new_token, users)
                         if events:
                             self.scheduler.submit_ephemeral_events_for_as(
                                 service, events
                             )
 
-                        # TODO: If max_stream_token != new_token, schedule another transaction immediately,
-                        #  instead of waiting for another to-device to be sent?
-                        # https://github.com/matrix-org/synapse/issues/11150#issuecomment-960726449
-
                         # Persist the latest handled stream token for this appservice
                         await self.store.set_type_stream_id_for_appservice(
-                            service, "to_device", max_stream_token
+                            service, "to_device", new_token
                         )
 
     async def _handle_typing(
@@ -487,7 +470,7 @@ class ApplicationServicesHandler:
         service: ApplicationService,
         new_token: int,
         users: Collection[Union[str, UserID]],
-    ) -> Tuple[List[JsonDict], int]:
+    ) -> List[JsonDict]:
         """
         Given an application service, determine which events it should receive
         from those between the last-recorded typing event stream token for this
@@ -499,11 +482,8 @@ class ApplicationServicesHandler:
             users: The users that should receive new to-device messages.
 
         Returns:
-            A two-tuple containing the following:
-                * A list of JSON dictionaries containing data derived from the typing events
-                  that should be sent to the given application service.
-                * The last-processed to-device message's stream id. If this does not equal
-                  `new_token` then there are likely more events to send.
+            A list of JSON dictionaries containing data derived from the typing events
+                that should be sent to the given application service.
         """
         # Get the stream token that this application service has processed up until
         from_key = await self.store.get_type_stream_id_for_appservice(
@@ -521,22 +501,13 @@ class ApplicationServicesHandler:
 
         if not users_appservice_is_interested_in:
             # Return early if the AS was not interested in any of these users
-            return [], new_token
+            return []
 
         # Retrieve the to-device messages for each user
-        (
-            recipient_user_id_device_id_to_messages,
-            # Record the maximum stream token of the retrieved messages that
-            # this function was able to pull before hitting the max to-device
-            # message count limit.
-            # We return this value later, to ensure we only record the stream
-            # token we managed to get up to, so that the rest can be sent later.
-            max_stream_token,
-        ) = await self.store.get_new_messages(
+        recipient_user_id_device_id_to_messages = await self.store.get_new_messages(
             users_appservice_is_interested_in,
             from_key,
             new_token,
-            limit=MAX_TO_DEVICE_MESSAGES_PER_AS_TRANSACTION,
         )
 
         # According to MSC2409, we'll need to add 'to_user_id' and 'to_device_id' fields
@@ -562,7 +533,7 @@ class ApplicationServicesHandler:
                     }
                 )
 
-        return message_payload, max_stream_token
+        return message_payload
 
     async def query_user_exists(self, user_id: str) -> bool:
         """Check if any application service knows this user_id exists.
