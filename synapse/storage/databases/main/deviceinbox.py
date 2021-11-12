@@ -191,7 +191,9 @@ class DeviceInboxWorkerStore(SQLBaseStore):
 
             # Create a dictionary of (user ID, device ID) -> list of messages that
             # that device is meant to receive.
-            recipient_user_id_device_id_to_messages = {}
+            recipient_user_id_device_id_to_messages: Dict[
+                Tuple[str, str], List[JsonDict]
+            ] = {}
 
             for row in txn:
                 recipient_user_id = row[0]
