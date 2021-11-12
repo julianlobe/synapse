@@ -149,9 +149,9 @@ class DeviceInboxWorkerStore(SQLBaseStore):
         Only to-device messages with stream ids between the given boundaries
         (from < X <= to) are returned.
 
-        Note that multiple messages can have the same stream id. Stream ids are
-        unique to *messages*, but there might be multiple recipients of a message, and
-        thus multiple entries in the device_inbox table with the same stream id.
+        Note that a stream ID can be shared by multiple copies of the same message with
+        different recipient devices. Each (device, message_content) tuple has their own
+        row in the device_inbox table.
 
         Args:
             user_ids: The users to retrieve to-device messages for.
